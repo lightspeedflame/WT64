@@ -1,0 +1,39 @@
+How to Create and Use a Python Virtual Environment on Windows 11 using PowerShell
+---------------------------------------------------------------------------------
+
+A virtual environment is a self-contained directory that holds a specific Python installation and its packages. This is a best practice for Python development to keep project dependencies isolated.
+
+1. Open PowerShell:
+   - Press the Windows key, type "PowerShell", and select "Windows PowerShell" from the results.
+
+2. Navigate to your Project Directory:
+   - In PowerShell, change to the `Chip2mid` folder you created on your desktop.
+   - Use this command, replacing `YourUsername` with your actual Windows username:
+     cd C:\Users\YourUsername\Desktop\Chip2mid
+
+3. Create the Virtual Environment:
+   - Run the following command. This will create a new folder named `.venv` inside your `Chip2mid` directory, which will contain the Python interpreter and package files.
+     python -m venv .venv
+
+4. Activate the Virtual Environment:
+   - Before you can use the environment, you need to activate it. Run this command:
+     .\.venv\Scripts\Activate.ps1
+
+   - After running this, your PowerShell prompt should change to show `(.venv)` at the beginning, indicating that the virtual environment is active.
+
+   - **Troubleshooting:** If you get an error about scripts being disabled on this system, you may need to change the execution policy for the current PowerShell session. Run this command and then try activating again:
+     Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
+
+5. Install Required Packages:
+   - With the virtual environment active, you can now install the necessary packages.
+   - This application requires the 'Pillow' library to handle PNG images. Install it using this command:
+     pip install Pillow
+   - The script will not run without this library.
+
+6. Deactivating the Virtual Environment:
+   - When you are finished working on your project, you can deactivate the environment by simply typing:
+     deactivate
+
+   - The `(.venv)` prefix will disappear from your prompt.
+
+You only need to CREATE the environment once (Step 3). For future work, just navigate to the directory, ACTIVATE it (Step 4), and you're ready to go. You only need to install the packages once (Step 5).
