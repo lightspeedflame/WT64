@@ -82,6 +82,7 @@ class AtariPlayer:
         self.emu = YM2149Emulator()
         self.playing = False
         self.ym_data = []
+        self.audio_thread = None
 
         pygame.mixer.init(frequency=SAMPLE_RATE, size=-16, channels=2) # Use 2 channels for stereo
         self.channel = pygame.mixer.Channel(0)
@@ -181,11 +182,15 @@ class AtariPlayer:
 
         self.playing = True
         self.status.config(text="PLAYING...")
-        threading.Thread(target=self._audio_loop, daemon=True).start()
+        self.audio_thread = threading.Thread(target=self._audio_loop, daemon=True)
+        self.audio_thread.start()
 
     def stop_music(self):
         if self.playing:
             self.playing = False
+            # Wait for the audio thread to finish
+            if self.audio_thread and self.audio_thread.is_alive():
+                self.audio_thread.join(timeout=0.5) # Wait up to 0.5s
             self.channel.stop()
             self.status.config(text="SYSTEM READY")
 
@@ -196,8 +201,9 @@ class AtariPlayer:
             if not self.playing:
                 break
 
-            # Throttle the loop to prevent the sound queue from getting too large
-            while self.channel.get_queue() and len(self.channel.get_queue()) > 8:
+            # Wait for the queue to clear before adding a new sound.
+            # This prevents us from generating audio data too far in advance.
+            while self.channel.get_queue() is not None:
                 if not self.playing: break
                 time.sleep(0.01)
 
@@ -207,7 +213,8 @@ class AtariPlayer:
 
             # Generate audio chunk and convert to stereo for better compatibility
             mono_chunk = self.emu.get_audio_chunk(chunk_size)
-            stereo_chunk = np.repeat(mono_chunk[:, np.newaxis], 2, axis=1)
+            # Reshape to a column vector and repeat for stereo
+            stereo_chunk = np.repeat(mono_chunk.reshape(-1, 1), 2, axis=1)
             sound = pygame.sndarray.make_sound(stereo_chunk)
 
             self.channel.queue(sound)
@@ -224,5 +231,12 @@ class AtariPlayer:
 if __name__ == "__main__":
     root = tk.Tk()
     root.title("Atari ST YM Player")
-    AtariPlayer(root)
+    player = AtariPlayer(root)
+
+    def on_closing():
+        player.stop_music()
+        pygame.quit()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_closing)
     root.mainloop()
