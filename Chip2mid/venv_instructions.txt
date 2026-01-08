@@ -26,9 +26,9 @@ A virtual environment is a self-contained directory that holds a specific Python
 
 5. Install Required Packages:
    - With the virtual environment active, you can now install the necessary packages.
-   - This application requires the 'Pillow' library to handle PNG images. Install it using this command:
-     pip install Pillow
-   - The script will not run without this library.
+   - This application requires 'Pillow' for images, 'pygame' for audio, and 'numpy' for audio processing. Install them all with this single command:
+     pip install Pillow pygame numpy
+   - The script will not run without these libraries.
 
 6. Deactivating the Virtual Environment:
    - When you are finished working on your project, you can deactivate the environment by simply typing:
