@@ -3,6 +3,7 @@ from tkinter import filedialog, messagebox
 import os
 import threading
 import time
+import wave
 
 # --- Dependency Check ---
 missing_modules = []
@@ -47,34 +48,115 @@ FRAME_RATE = 50         # 50Hz update rate
 
 class YM2149Emulator:
     def __init__(self):
-        self.regs = [0] * 14
-        self.phase = [0.0, 0.0, 0.0]
+        self.regs = np.zeros(14, dtype=np.uint8)
+        self.reset()
+
+    def reset(self):
+        self.tone_period = np.zeros(3, dtype=np.uint16)
+        self.tone_counter = np.zeros(3, dtype=np.float64)
+        self.tone_output = np.ones(3, dtype=np.int8)
+        self.noise_period = 0
+        self.noise_counter = 0.0
+        self.noise_rng = 1
+        self.noise_output = 1
+        self.env_period = 0
+        self.env_counter = 0.0
+        self.env_shape = 0
+        self.env_holding = False
+        self.env_step = 0
+        self.amp = np.zeros(3, dtype=np.float32)
+
+        # Pre-calculated volume table for non-envelope mode
+        self.volume_table = np.array([
+            0.0, 0.014, 0.02, 0.028, 0.04, 0.056, 0.08, 0.112,
+            0.16, 0.224, 0.31, 0.44, 0.62, 0.88, 1.24, 1.76
+        ]) / 1.76
 
     def update(self, regs):
-        self.regs = regs
+        self.regs = np.array(regs, dtype=np.uint8)
+        # Update internal state based on registers
+        self.tone_period[0] = self.regs[0] | ((self.regs[1] & 0x0F) << 8)
+        self.tone_period[1] = self.regs[2] | ((self.regs[3] & 0x0F) << 8)
+        self.tone_period[2] = self.regs[4] | ((self.regs[5] & 0x0F) << 8)
+        self.noise_period = self.regs[6] & 0x1F
+        self.env_period = self.regs[11] | (self.regs[12] << 8)
+
+        new_env_shape = self.regs[13]
+        if new_env_shape != 0xFF: # 0xFF is a special value meaning "don't change"
+            if self.env_shape != new_env_shape:
+                 self.env_shape = new_env_shape
+                 # Trigger envelope attack (reset)
+                 self.env_holding = False
+                 self.env_step = 0
+                 self.env_counter = 0
 
     def get_audio_chunk(self, num_samples):
-        # Frequency = fMaster / (16 * TP)
-        tp = [
-            self.regs[0] | ((self.regs[1] & 0x0F) << 8),
-            self.regs[2] | ((self.regs[3] & 0x0F) << 8),
-            self.regs[4] | ((self.regs[5] & 0x0F) << 8)
-        ]
-
-        freqs = [MASTER_CLOCK / (16 * t) if t > 0 else 0 for t in tp]
-        vols = [(self.regs[i] & 0x0F) / 15.0 for i in [8, 9, 10]]
-
-        t = np.arange(num_samples) / SAMPLE_RATE
         output = np.zeros(num_samples)
 
-        for i in range(3):
-            if freqs[i] > 0:
-                # Generate Square Wave
-                sig = np.sign(np.sin(2 * np.pi * freqs[i] * t + self.phase[i]))
-                output += sig * vols[i]
-                self.phase[i] = (self.phase[i] + 2 * np.pi * freqs[i] * num_samples / SAMPLE_RATE) % (2 * np.pi)
+        # Clock rate for each component
+        tone_clock_step = float(MASTER_CLOCK) / (16 * SAMPLE_RATE)
+        noise_clock_step = float(MASTER_CLOCK) / (16 * SAMPLE_RATE)
+        env_clock_step = float(MASTER_CLOCK) / (256 * SAMPLE_RATE)
 
-        return (output * 0.3 * 32767).astype(np.int16)
+        for i in range(num_samples):
+            # --- Tone Generators ---
+            for c in range(3):
+                self.tone_counter[c] += tone_clock_step
+                if self.tone_counter[c] >= self.tone_period[c]:
+                    self.tone_counter[c] = 0
+                    self.tone_output[c] *= -1
+
+            # --- Noise Generator (LFSR) ---
+            self.noise_counter += noise_clock_step
+            if self.noise_counter >= self.noise_period:
+                self.noise_counter = 0
+                # Simple 17-bit LFSR
+                self.noise_rng = (self.noise_rng >> 1) ^ (0x24000 if (self.noise_rng & 1) else 0)
+                self.noise_output = (self.noise_rng & 1) * 2 - 1
+
+            # --- Envelope Generator ---
+            if not self.env_holding:
+                self.env_counter += env_clock_step
+                if self.env_counter >= self.env_period:
+                    self.env_counter = 0
+                    self.env_step += 1
+                    if self.env_step > 15:
+                        self.env_step = 15
+                        # Handle envelope shape looping/holding
+                        if self.env_shape < 4 or (self.env_shape >= 8 and self.env_shape < 12):
+                            self.env_holding = True # Hold
+                        elif self.env_shape < 8:
+                            self.env_step = 0 # Loop
+                        else: # Shapes >= 12
+                             self.env_step = 15 if self.env_shape in [12, 14] else 0
+
+            # Determine volume for each channel
+            for c in range(3):
+                use_envelope = (self.regs[8+c] & 0x10) > 0
+                if use_envelope:
+                    # Envelope shapes are complex, this is a simplified version
+                    vol_idx = self.env_step if self.env_shape < 8 else 15 - self.env_step
+                    self.amp[c] = self.volume_table[vol_idx]
+                else:
+                    self.amp[c] = self.volume_table[self.regs[8+c] & 0x0F]
+
+            # --- Mixer ---
+            mixer = self.regs[7]
+            sample = 0.0
+            for c in range(3):
+                 # Tone enabled?
+                tone_on = (mixer & (1 << c)) == 0
+                 # Noise enabled?
+                noise_on = (mixer & (8 << c)) == 0
+
+                signal = self.tone_output[c] if tone_on else 1.0
+                signal = min(signal, self.noise_output if noise_on else 1.0)
+
+                sample += signal * self.amp[c]
+
+            output[i] = sample / 3.0 # Average the 3 channels
+
+        return (output * 32767).astype(np.int16)
 
 class AtariPlayer:
     def __init__(self, root):
@@ -130,6 +212,8 @@ class AtariPlayer:
 
     def load_file(self):
         self.stop_music()
+        # Reset emulator state before loading a new file
+        self.emu.reset()
         path = filedialog.askopenfilename(filetypes=[("YM Files", "*.ym")])
         if not path:
             return
@@ -180,6 +264,20 @@ class AtariPlayer:
         if self.playing:
             return
 
+        # --- Register Stream Logging ---
+        try:
+            with open("register_dump.txt", "w") as f:
+                f.write("Frame, R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, R13\n")
+                for i, frame_regs in enumerate(self.ym_data):
+                    # Format as hex for easier comparison with debuggers
+                    regs_str = ", ".join(f"{val:02X}" for val in frame_regs)
+                    f.write(f"{i}, {regs_str}\n")
+            self.status.config(text="Register dump written.")
+        except Exception as e:
+            messagebox.showerror("Logging Error", f"Failed to write register dump: {e}")
+            return # Don't proceed if logging fails
+        # --- End Logging ---
+
         self.playing = True
         self.status.config(text="GENERATING...")
         self.root.update_idletasks() # Update UI
@@ -187,11 +285,25 @@ class AtariPlayer:
         # Pre-generate all audio chunks
         chunk_size = int(SAMPLE_RATE / FRAME_RATE)
         all_sounds = []
+        full_mono_audio = np.array([], dtype=np.int16)
         for frame in self.ym_data:
             self.emu.update(frame)
             mono_chunk = self.emu.get_audio_chunk(chunk_size)
+            full_mono_audio = np.concatenate((full_mono_audio, mono_chunk))
             stereo_chunk = np.repeat(mono_chunk.reshape(-1, 1), 2, axis=1)
             all_sounds.append(pygame.sndarray.make_sound(stereo_chunk))
+
+        # --- Save to WAV file for testing ---
+        try:
+            with wave.open("output.wav", "w") as wf:
+                wf.setnchannels(1) # Mono
+                wf.setsampwidth(2) # 16-bit
+                wf.setframerate(SAMPLE_RATE)
+                wf.writeframes(full_mono_audio.tobytes())
+            self.status.config(text="WAV saved.")
+        except Exception as e:
+            messagebox.showerror("WAV Error", f"Failed to save WAV file: {e}")
+        # --- End WAV save ---
 
         if not all_sounds:
             self.status.config(text="ERROR: No sound data.")
