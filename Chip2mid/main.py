@@ -82,7 +82,7 @@ class AtariPlayer:
         self.emu = YM2149Emulator()
         self.playing = False
         self.ym_data = []
-        self.audio_thread = None
+        self.monitor_thread = None
 
         pygame.mixer.init(frequency=SAMPLE_RATE, size=-16, channels=2) # Use 2 channels for stereo
         self.channel = pygame.mixer.Channel(0)
@@ -181,50 +181,48 @@ class AtariPlayer:
             return
 
         self.playing = True
-        self.status.config(text="PLAYING...")
-        self.audio_thread = threading.Thread(target=self._audio_loop, daemon=True)
-        self.audio_thread.start()
+        self.status.config(text="GENERATING...")
+        self.root.update_idletasks() # Update UI
 
-    def stop_music(self):
-        if self.playing:
-            self.playing = False
-            # Wait for the audio thread to finish
-            if self.audio_thread and self.audio_thread.is_alive():
-                self.audio_thread.join(timeout=0.5) # Wait up to 0.5s
-            self.channel.stop()
-            self.status.config(text="SYSTEM READY")
-
-    def _audio_loop(self):
+        # Pre-generate all audio chunks
         chunk_size = int(SAMPLE_RATE / FRAME_RATE)
-
+        all_sounds = []
         for frame in self.ym_data:
-            if not self.playing:
-                break
-
-            # Wait for the queue to clear before adding a new sound.
-            # This prevents us from generating audio data too far in advance.
-            while self.channel.get_queue() is not None:
-                if not self.playing: break
-                time.sleep(0.01)
-
-            if not self.playing: break
-
             self.emu.update(frame)
-
-            # Generate audio chunk and convert to stereo for better compatibility
             mono_chunk = self.emu.get_audio_chunk(chunk_size)
-            # Reshape to a column vector and repeat for stereo
             stereo_chunk = np.repeat(mono_chunk.reshape(-1, 1), 2, axis=1)
-            sound = pygame.sndarray.make_sound(stereo_chunk)
+            all_sounds.append(pygame.sndarray.make_sound(stereo_chunk))
 
+        if not all_sounds:
+            self.status.config(text="ERROR: No sound data.")
+            self.playing = False
+            return
+
+        # Pygame's queue handles seamless playback
+        self.channel.play(all_sounds[0])
+        for sound in all_sounds[1:]:
             self.channel.queue(sound)
 
-        # Wait for the queue to finish playing
-        while self.channel.get_queue() is not None:
-            if not self.playing: break
+        self.status.config(text="PLAYING...")
+
+        # Start a thread to monitor when playback is finished
+        self.monitor_thread = threading.Thread(target=self._monitor_playback, daemon=True)
+        self.monitor_thread.start()
+
+    def stop_music(self):
+        self.playing = False # This acts as a signal to the monitor thread
+        self.channel.stop()
+        self.status.config(text="SYSTEM READY")
+
+    def _monitor_playback(self):
+        """Monitors the audio channel and updates status when done."""
+        while self.channel.get_busy():
+            if not self.playing: # Stop was called
+                return
             time.sleep(0.1)
 
-        if self.playing: # Finished naturally
+        # If the loop finishes and we weren't manually stopped, the song ended.
+        if self.playing:
             self.playing = False
             self.status.config(text="SYSTEM READY")
 
