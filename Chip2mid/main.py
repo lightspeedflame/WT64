@@ -5,14 +5,35 @@ import threading
 import time
 
 # --- Dependency Check ---
-try:
-    from PIL import ImageTk, Image
-    import pygame
-    import numpy as np
-    import lhafile
-except ImportError as e:
-    print(f"Error: Missing dependency: {e}")
-    exit()
+def check_dependencies():
+    missing_modules = []
+    try:
+        from PIL import ImageTk, Image
+    except ImportError:
+        missing_modules.append("Pillow")
+    try:
+        import pygame
+    except ImportError:
+        missing_modules.append("pygame")
+    try:
+        import numpy as np
+    except ImportError:
+        missing_modules.append("numpy")
+    try:
+        import lhafile
+    except ImportError:
+        missing_modules.append("lhafile")
+
+    if missing_modules:
+        root = tk.Tk()
+        root.withdraw()  # Hide the main window
+        message = f"The following required modules are missing: {', '.join(missing_modules)}\n\n"
+        message += "Please install them by running this command in your terminal:\n"
+        message += f"pip install {' '.join(m.lower() for m in missing_modules)}"
+        messagebox.showerror("Missing Dependencies", message)
+        exit()
+
+check_dependencies()
 
 # --- Constants ---
 SAMPLE_RATE = 44100
