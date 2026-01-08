@@ -9,12 +9,12 @@ try:
     from PIL import ImageTk, Image
     import pygame
     import numpy as np
+    import lhafile
 except ImportError as e:
     print(f"Error: Missing dependency: {e}")
     exit()
 
 # --- Constants ---
-IMAGE_FILENAME = "Futuristic chiptune converter interface.jpg"
 SAMPLE_RATE = 44100
 MASTER_CLOCK = 2000000  # 2MHz Clock for Atari ST
 FRAME_RATE = 50         # 50Hz update rate
@@ -62,15 +62,18 @@ class AtariPlayer:
         self.setup_ui()
 
     def setup_ui(self):
-        try:
-            # Check for the image in the current directory, and then in the parent directory
-            if os.path.exists(IMAGE_FILENAME):
-                img_path = IMAGE_FILENAME
-            elif os.path.exists(os.path.join("..", IMAGE_FILENAME)):
-                img_path = os.path.join("..", IMAGE_FILENAME)
-            else:
-                img_path = None
+        img_path = None
+        # Check for both .jpg and .png versions of the image
+        for ext in ['.jpg', '.png']:
+            filename = "Futuristic chiptune converter interface" + ext
+            if os.path.exists(filename):
+                img_path = filename
+                break
+            elif os.path.exists(os.path.join("..", filename)):
+                img_path = os.path.join("..", filename)
+                break
 
+        try:
             if img_path:
                 img = Image.open(img_path)
                 self.bg_img = ImageTk.PhotoImage(img)
@@ -80,7 +83,7 @@ class AtariPlayer:
                 # If the image is not found, show an error and set a default size
                 messagebox.showerror(
                     "Error: Image Not Found",
-                    f"The background image '{IMAGE_FILENAME}' was not found.\n\nPlease make sure the image file is in the same directory as the application."
+                    "The background image ('Futuristic chiptune converter interface.jpg' or .png) was not found.\n\nPlease make sure the image file is in the same directory as the application."
                 )
                 self.root.geometry("600x400")
         except Exception as e:
@@ -101,30 +104,47 @@ class AtariPlayer:
     def load_file(self):
         self.stop_music()
         path = filedialog.askopenfilename(filetypes=[("YM Files", "*.ym")])
-        if path:
+        if not path:
+            return
+
+        try:
             with open(path, "rb") as f:
-                raw = f.read()
+                raw_data = f.read()
 
-            # Basic format validation
-            header = raw[:4]
-            if header not in (b'YM5!', b'YM6!'):
-                messagebox.showwarning("Unsupported Format", "This does not appear to be a YM5 or YM6 file.")
-                return
+            # Check for LHA compression
+            if lhafile.is_lhafile(path):
+                lha = lhafile.LhaFile(path)
+                # Assuming the first file in the archive is the one we want
+                filename = lha.namelist()[0]
+                raw_data = lha.read(filename)
 
-            # Find data block and de-interleave
-            data_start = raw.find(b'YM_dat')
+            # Now, process the (potentially decompressed) raw_data
+            header = raw_data[:4]
+            if header not in (b'YM5!', b'YM6!', b'YM2!', b'YM3!', b'YM3b'):
+                 messagebox.showwarning("Unsupported Format", f"Unsupported YM format or invalid file: {header.decode('ascii', 'ignore')}")
+                 return
+
+            # Simple de-interleaver for YM5/YM6 files
+            # Note: This is a simplified parser. A more robust solution would
+            # properly parse the full header to find the data offset.
+            data_start = raw_data.find(b'YM_dat')
             if data_start != -1:
-                data = raw[data_start + len(b'YM_dat'):]
+                data = raw_data[data_start + len(b'YM_dat'):]
             else: # Fallback for older formats
-                data = raw[34:]
+                data = raw_data[34:]
 
             num_frames = len(data) // 14
             if num_frames == 0:
                 self.status.config(text="ERROR: No frames found!")
                 return
 
+            # De-interleave the register data
             self.ym_data = [[data[r * num_frames + f] for r in range(14)] for f in range(num_frames)]
             self.status.config(text=f"LOADED: {os.path.basename(path)}")
+
+        except Exception as e:
+            messagebox.showerror("Error Loading File", f"An error occurred while loading the file:\n{e}")
+            self.status.config(text="ERROR: Load failed")
 
     def play_music(self):
         if not self.ym_data:

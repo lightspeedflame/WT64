@@ -26,8 +26,8 @@ A virtual environment is a self-contained directory that holds a specific Python
 
 5. Install Required Packages:
    - With the virtual environment active, you can now install the necessary packages.
-   - This application requires 'Pillow' for images, 'pygame' for audio, and 'numpy' for audio processing. Install them all with this single command:
-     pip install Pillow pygame numpy
+   - This application requires 'Pillow' for images, 'pygame' for audio, 'numpy' for audio processing, and 'lhafile' for compressed chiptunes. Install them all with this single command:
+     pip install Pillow pygame numpy lhafile
    - The script will not run without these libraries.
 
 6. Deactivating the Virtual Environment:
