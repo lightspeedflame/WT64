@@ -5,35 +5,40 @@ import threading
 import time
 
 # --- Dependency Check ---
-def check_dependencies():
-    missing_modules = []
-    try:
-        from PIL import ImageTk, Image
-    except ImportError:
-        missing_modules.append("Pillow")
-    try:
-        import pygame
-    except ImportError:
-        missing_modules.append("pygame")
-    try:
-        import numpy as np
-    except ImportError:
-        missing_modules.append("numpy")
-    try:
-        import lhafile
-    except ImportError:
-        missing_modules.append("lhafile")
+missing_modules = []
+try:
+    from PIL import ImageTk, Image
+except ImportError:
+    missing_modules.append("Pillow")
+try:
+    import pygame
+except ImportError:
+    missing_modules.append("pygame")
+try:
+    import numpy as np
+except ImportError:
+    missing_modules.append("numpy")
+try:
+    import lhafile
+except ImportError:
+    missing_modules.append("lhafile")
 
-    if missing_modules:
+if missing_modules:
+    # We need tkinter to show the error, but it might not be the missing one.
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
         root = tk.Tk()
-        root.withdraw()  # Hide the main window
+        root.withdraw()
         message = f"The following required modules are missing: {', '.join(missing_modules)}\n\n"
         message += "Please install them by running this command in your terminal:\n"
         message += f"pip install {' '.join(m.lower() for m in missing_modules)}"
         messagebox.showerror("Missing Dependencies", message)
-        exit()
-
-check_dependencies()
+    except ImportError:
+        # Fallback to console if tkinter itself is missing
+        print(f"ERROR: Missing required modules: {', '.join(missing_modules)}")
+        print(f"Please install them by running: pip install {' '.join(m.lower() for m in missing_modules)}")
+    exit()
 
 # --- Constants ---
 SAMPLE_RATE = 44100
