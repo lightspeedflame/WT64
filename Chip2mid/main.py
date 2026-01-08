@@ -63,22 +63,29 @@ class AtariPlayer:
 
     def setup_ui(self):
         try:
-            # Check if image file exists, and handle running from different directories
-            if not os.path.exists(IMAGE_FILENAME):
-                parent_dir_img_path = os.path.join("..", IMAGE_FILENAME)
-                if os.path.exists(parent_dir_img_path):
-                    img_path = parent_dir_img_path
-                else:
-                    raise FileNotFoundError(f"Image file not found: {IMAGE_FILENAME}")
-            else:
+            # Check for the image in the current directory, and then in the parent directory
+            if os.path.exists(IMAGE_FILENAME):
                 img_path = IMAGE_FILENAME
+            elif os.path.exists(os.path.join("..", IMAGE_FILENAME)):
+                img_path = os.path.join("..", IMAGE_FILENAME)
+            else:
+                img_path = None
 
-            img = Image.open(img_path)
-            self.bg_img = ImageTk.PhotoImage(img)
-            self.root.geometry(f"{img.width}x{img.height}")
-            tk.Label(self.root, image=self.bg_img).place(x=0, y=0, relwidth=1, relheight=1)
+            if img_path:
+                img = Image.open(img_path)
+                self.bg_img = ImageTk.PhotoImage(img)
+                self.root.geometry(f"{img.width}x{img.height}")
+                tk.Label(self.root, image=self.bg_img).place(x=0, y=0, relwidth=1, relheight=1)
+            else:
+                # If the image is not found, show an error and set a default size
+                messagebox.showerror(
+                    "Error: Image Not Found",
+                    f"The background image '{IMAGE_FILENAME}' was not found.\n\nPlease make sure the image file is in the same directory as the application."
+                )
+                self.root.geometry("600x400")
         except Exception as e:
-            print(f"Error loading background image: {e}")
+            # Catch other potential errors with image loading
+            messagebox.showerror("Error", f"An unexpected error occurred while loading the image: {e}")
             self.root.geometry("600x400")
 
         # Custom buttons placed on your GUI image
