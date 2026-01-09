@@ -24,6 +24,10 @@ try:
 except ImportError:
     missing_modules.append("lhafile")
 
+# --- Local Imports ---
+from ym_parser import YMParser
+from psg_emulator import PSG
+
 if missing_modules:
     # We need tkinter to show the error, but it might not be the missing one.
     try:
@@ -46,122 +50,10 @@ SAMPLE_RATE = 44100
 MASTER_CLOCK = 2000000  # 2MHz Clock for Atari ST
 FRAME_RATE = 50         # 50Hz update rate
 
-class YM2149Emulator:
-    def __init__(self):
-        self.regs = np.zeros(14, dtype=np.uint8)
-        self.reset()
-
-    def reset(self):
-        self.tone_period = np.zeros(3, dtype=np.uint16)
-        self.tone_counter = np.zeros(3, dtype=np.float64)
-        self.tone_output = np.ones(3, dtype=np.int8)
-        self.noise_period = 0
-        self.noise_counter = 0.0
-        self.noise_rng = 1
-        self.noise_output = 1
-        self.env_period = 0
-        self.env_counter = 0.0
-        self.env_shape = 0
-        self.env_holding = False
-        self.env_step = 0
-        self.amp = np.zeros(3, dtype=np.float32)
-
-        # Pre-calculated volume table for non-envelope mode
-        self.volume_table = np.array([
-            0.0, 0.014, 0.02, 0.028, 0.04, 0.056, 0.08, 0.112,
-            0.16, 0.224, 0.31, 0.44, 0.62, 0.88, 1.24, 1.76
-        ]) / 1.76
-
-    def update(self, regs):
-        self.regs = np.array(regs, dtype=np.uint8)
-        # Update internal state based on registers
-        self.tone_period[0] = self.regs[0] | ((self.regs[1] & 0x0F) << 8)
-        self.tone_period[1] = self.regs[2] | ((self.regs[3] & 0x0F) << 8)
-        self.tone_period[2] = self.regs[4] | ((self.regs[5] & 0x0F) << 8)
-        self.noise_period = self.regs[6] & 0x1F
-        self.env_period = self.regs[11] | (self.regs[12] << 8)
-
-        new_env_shape = self.regs[13]
-        if new_env_shape != 0xFF: # 0xFF is a special value meaning "don't change"
-            if self.env_shape != new_env_shape:
-                 self.env_shape = new_env_shape
-                 # Trigger envelope attack (reset)
-                 self.env_holding = False
-                 self.env_step = 0
-                 self.env_counter = 0
-
-    def get_audio_chunk(self, num_samples):
-        output = np.zeros(num_samples)
-
-        # Clock rate for each component
-        tone_clock_step = float(MASTER_CLOCK) / (16 * SAMPLE_RATE)
-        noise_clock_step = float(MASTER_CLOCK) / (16 * SAMPLE_RATE)
-        env_clock_step = float(MASTER_CLOCK) / (256 * SAMPLE_RATE)
-
-        for i in range(num_samples):
-            # --- Tone Generators ---
-            for c in range(3):
-                self.tone_counter[c] += tone_clock_step
-                if self.tone_counter[c] >= self.tone_period[c]:
-                    self.tone_counter[c] = 0
-                    self.tone_output[c] *= -1
-
-            # --- Noise Generator (LFSR) ---
-            self.noise_counter += noise_clock_step
-            if self.noise_counter >= self.noise_period:
-                self.noise_counter = 0
-                # Simple 17-bit LFSR
-                self.noise_rng = (self.noise_rng >> 1) ^ (0x24000 if (self.noise_rng & 1) else 0)
-                self.noise_output = (self.noise_rng & 1) * 2 - 1
-
-            # --- Envelope Generator ---
-            if not self.env_holding:
-                self.env_counter += env_clock_step
-                if self.env_counter >= self.env_period:
-                    self.env_counter = 0
-                    self.env_step += 1
-                    if self.env_step > 15:
-                        self.env_step = 15
-                        # Handle envelope shape looping/holding
-                        if self.env_shape < 4 or (self.env_shape >= 8 and self.env_shape < 12):
-                            self.env_holding = True # Hold
-                        elif self.env_shape < 8:
-                            self.env_step = 0 # Loop
-                        else: # Shapes >= 12
-                             self.env_step = 15 if self.env_shape in [12, 14] else 0
-
-            # Determine volume for each channel
-            for c in range(3):
-                use_envelope = (self.regs[8+c] & 0x10) > 0
-                if use_envelope:
-                    # Envelope shapes are complex, this is a simplified version
-                    vol_idx = self.env_step if self.env_shape < 8 else 15 - self.env_step
-                    self.amp[c] = self.volume_table[vol_idx]
-                else:
-                    self.amp[c] = self.volume_table[self.regs[8+c] & 0x0F]
-
-            # --- Mixer ---
-            mixer = self.regs[7]
-            sample = 0.0
-            for c in range(3):
-                 # Tone enabled?
-                tone_on = (mixer & (1 << c)) == 0
-                 # Noise enabled?
-                noise_on = (mixer & (8 << c)) == 0
-
-                signal = self.tone_output[c] if tone_on else 1.0
-                signal = min(signal, self.noise_output if noise_on else 1.0)
-
-                sample += signal * self.amp[c]
-
-            output[i] = sample / 3.0 # Average the 3 channels
-
-        return (output * 32767).astype(np.int16)
-
 class AtariPlayer:
     def __init__(self, root):
         self.root = root
-        self.emu = YM2149Emulator()
+        self.emu = None # To be replaced with the new PSG emulator
         self.playing = False
         self.ym_data = []
         self.monitor_thread = None
@@ -212,50 +104,22 @@ class AtariPlayer:
 
     def load_file(self):
         self.stop_music()
-        # Reset emulator state before loading a new file
-        self.emu.reset()
         path = filedialog.askopenfilename(filetypes=[("YM Files", "*.ym")])
         if not path:
             return
 
-        try:
-            with open(path, "rb") as f:
-                raw_data = f.read()
+        self.status.config(text="PARSING...")
+        self.root.update_idletasks()
 
-            # Check for LHA compression
-            if lhafile.is_lhafile(path):
-                lha = lhafile.LhaFile(path)
-                # Assuming the first file in the archive is the one we want
-                filename = lha.namelist()[0]
-                raw_data = lha.read(filename)
-
-            # Now, process the (potentially decompressed) raw_data
-            header = raw_data[:4]
-            if header not in (b'YM5!', b'YM6!', b'YM2!', b'YM3!', b'YM3b'):
-                 messagebox.showwarning("Unsupported Format", f"Unsupported YM format or invalid file: {header.decode('ascii', 'ignore')}")
-                 return
-
-            # Simple de-interleaver for YM5/YM6 files
-            # Note: This is a simplified parser. A more robust solution would
-            # properly parse the full header to find the data offset.
-            data_start = raw_data.find(b'YM_dat')
-            if data_start != -1:
-                data = raw_data[data_start + len(b'YM_dat'):]
-            else: # Fallback for older formats
-                data = raw_data[34:]
-
-            num_frames = len(data) // 14
-            if num_frames == 0:
-                self.status.config(text="ERROR: No frames found!")
-                return
-
-            # De-interleave the register data
-            self.ym_data = [[data[r * num_frames + f] for r in range(14)] for f in range(num_frames)]
+        self.parser = YMParser()
+        if self.parser.parse(path):
             self.status.config(text=f"LOADED: {os.path.basename(path)}")
-
-        except Exception as e:
-            messagebox.showerror("Error Loading File", f"An error occurred while loading the file:\n{e}")
-            self.status.config(text="ERROR: Load failed")
+            # For simplicity, we keep the raw frame data handy for the play function
+            self.ym_data = self.parser.frames
+        else:
+            messagebox.showerror("Parsing Error", "Failed to parse the YM file. Check console for details.")
+            self.status.config(text="ERROR: Parse failed")
+            self.ym_data = [] # Clear any old data
 
     def play_music(self):
         if not self.ym_data:
@@ -264,62 +128,75 @@ class AtariPlayer:
         if self.playing:
             return
 
-        # --- Register Stream Logging ---
-        try:
-            with open("register_dump.txt", "w") as f:
-                f.write("Frame, R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, R13\n")
-                for i, frame_regs in enumerate(self.ym_data):
-                    # Format as hex for easier comparison with debuggers
-                    regs_str = ", ".join(f"{val:02X}" for val in frame_regs)
-                    f.write(f"{i}, {regs_str}\n")
-            self.status.config(text="Register dump written.")
-        except Exception as e:
-            messagebox.showerror("Logging Error", f"Failed to write register dump: {e}")
-            return # Don't proceed if logging fails
-        # --- End Logging ---
-
         self.playing = True
-        self.status.config(text="GENERATING...")
-        self.root.update_idletasks() # Update UI
 
-        # Pre-generate all audio chunks
-        chunk_size = int(SAMPLE_RATE / FRAME_RATE)
-        all_sounds = []
-        full_mono_audio = np.array([], dtype=np.int16)
-        for frame in self.ym_data:
-            self.emu.update(frame)
-            mono_chunk = self.emu.get_audio_chunk(chunk_size)
-            full_mono_audio = np.concatenate((full_mono_audio, mono_chunk))
-            stereo_chunk = np.repeat(mono_chunk.reshape(-1, 1), 2, axis=1)
-            all_sounds.append(pygame.sndarray.make_sound(stereo_chunk))
+        # Render the audio to a WAV file
+        full_mono_audio = self.render_to_wav(self.parser)
 
-        # --- Save to WAV file for testing ---
-        try:
-            with wave.open("output.wav", "w") as wf:
-                wf.setnchannels(1) # Mono
-                wf.setsampwidth(2) # 16-bit
-                wf.setframerate(SAMPLE_RATE)
-                wf.writeframes(full_mono_audio.tobytes())
-            self.status.config(text="WAV saved.")
-        except Exception as e:
-            messagebox.showerror("WAV Error", f"Failed to save WAV file: {e}")
-        # --- End WAV save ---
+        # Convert mono PCM to stereo for pygame
+        stereo_audio = np.repeat(full_mono_audio.reshape(-1, 1), 2, axis=1)
 
-        if not all_sounds:
-            self.status.config(text="ERROR: No sound data.")
+        # Create a single pygame Sound object from the full audio data
+        sound = pygame.sndarray.make_sound(stereo_audio)
+
+        if not sound:
+            self.status.config(text="ERROR: Sound generation failed.")
             self.playing = False
             return
 
-        # Pygame's queue handles seamless playback
-        self.channel.play(all_sounds[0])
-        for sound in all_sounds[1:]:
-            self.channel.queue(sound)
+        # Play the sound
+        self.channel.play(sound)
 
         self.status.config(text="PLAYING...")
 
         # Start a thread to monitor when playback is finished
         self.monitor_thread = threading.Thread(target=self._monitor_playback, daemon=True)
         self.monitor_thread.start()
+
+    def render_to_wav(self, parser, output_path="output.wav"):
+        """
+        Renders the parsed YM data to a WAV file.
+        Returns the raw mono audio data as a numpy array.
+        """
+        self.status.config(text="RENDERING...")
+        self.root.update_idletasks()
+
+        header = parser.header
+        frames = parser.frames
+
+        # Initialize the PSG emulator with parameters from the YM file
+        self.emu = PSG(header['master_clock_hz'], SAMPLE_RATE)
+
+        samples_per_frame = int(SAMPLE_RATE / header['frame_rate_hz'])
+        total_samples = samples_per_frame * len(frames)
+
+        audio_buffer = np.zeros(total_samples, dtype=np.float32)
+
+        for i, frame_regs in enumerate(frames):
+            self.emu.set_registers(frame_regs)
+            start_sample = i * samples_per_frame
+            for j in range(samples_per_frame):
+                audio_buffer[start_sample + j] = self.emu.tick()
+
+        # Normalize and convert to 16-bit PCM
+        max_val = np.max(np.abs(audio_buffer))
+        if max_val > 0:
+            audio_buffer /= max_val
+
+        pcm_data = (audio_buffer * 32767).astype(np.int16)
+
+        # --- Save to WAV file ---
+        try:
+            with wave.open(output_path, "w") as wf:
+                wf.setnchannels(1)  # Mono
+                wf.setsampwidth(2)  # 16-bit
+                wf.setframerate(SAMPLE_RATE)
+                wf.writeframes(pcm_data.tobytes())
+            self.status.config(text="WAV saved.")
+        except Exception as e:
+            messagebox.showerror("WAV Error", f"Failed to save WAV file: {e}")
+
+        return pcm_data
 
     def stop_music(self):
         self.playing = False # This acts as a signal to the monitor thread
