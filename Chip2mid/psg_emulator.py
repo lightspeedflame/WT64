@@ -1,6 +1,6 @@
 import numpy as np
 
-class PSG:
+class YM2149:
     def __init__(self, master_clock, sample_rate):
         self.master_clock = master_clock
         self.sample_rate = sample_rate
